@@ -3,7 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"log"
 	"os"
 	"runtime"
 	"strconv"
@@ -93,7 +93,7 @@ func NewScheduler(cfg Config, handlers map[string]HandlerFunc) *Scheduler {
 	hostname, _ := os.Hostname()
 	pid := os.Getpid()
 	workerID := fmt.Sprintf("%s-%d-%s", hostname, pid, uuid.New().String()[:8])
-	slog.Info("worker init", "worker_id", workerID)
+	log.Printf("INFO: worker init, worker_id=%s",("worker init", "worker_id", workerID)
 
 	var rdb redis.UniversalClient
 	if cfg.UseCluster {
@@ -204,7 +204,7 @@ func (s *Scheduler) atomicLockAndPop(ctx context.Context, taskID string) bool {
 	}, taskID, strconv.FormatInt(nowNs, 10), strconv.FormatInt(int64(s.config.LockTTL.Milliseconds()), 10)).Result()
 
 	if err != nil {
-		slog.Error("lua lock-pop failed", "taskID", taskID, "err", err)
+		log.Printf("ERROR: ("lua lock-pop failed", "taskID", taskID, "err", err)
 		return false
 	}
 
@@ -243,7 +243,7 @@ func (s *Scheduler) processTask(ctx context.Context, taskID string) {
 		}
 	}
 
-	slog.Info("processing", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName)
+	log.Printf("INFO: worker init, worker_id=%s",("processing", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName)
 
 	start := time.Now()
 	var handlerErr error
@@ -257,7 +257,7 @@ func (s *Scheduler) processTask(ctx context.Context, taskID string) {
 	s.metrics.handlerDuration.WithLabelValues(handlerName).Observe(duration.Seconds())
 
 	if handlerErr != nil {
-		slog.Error("handler failed", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName, "err", handlerErr)
+		log.Printf("ERROR: ("handler failed", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName, "err", handlerErr)
 		s.metrics.tasksFailed.WithLabelValues(handlerName).Inc()
 		s.metrics.tasksExecuted.WithLabelValues(handlerName, "false").Inc()
 
@@ -267,7 +267,7 @@ func (s *Scheduler) processTask(ctx context.Context, taskID string) {
 			s.deadLetter(ctx, taskID)
 		}
 	} else {
-		slog.Info("task completed", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName)
+		log.Printf("INFO: worker init, worker_id=%s",("task completed", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName)
 		s.metrics.tasksExecuted.WithLabelValues(handlerName, "true").Inc()
 		s.rdb.Del(ctx, taskKey)
 	}
@@ -296,7 +296,7 @@ func (s *Scheduler) handleRetry(ctx context.Context, taskID string, retryCount i
 }
 
 func (s *Scheduler) deadLetter(ctx context.Context, taskID string) {
-	slog.Warn("dead lettering task", "worker_id", s.workerID, "taskID", taskID)
+	log.Printf("WARN: ("dead lettering task", "worker_id", s.workerID, "taskID", taskID)
 	s.metrics.tasksDeadLettered.Inc()
 
 	taskKey := fmt.Sprintf("scheduler:task:%s", taskID)
@@ -318,7 +318,7 @@ func (s *Scheduler) poll(ctx context.Context) {
 	opts := &redis.ZRangeByScore{Min: "-inf", Max: strconv.FormatInt(nowNs, 10), Count: int64(s.config.BatchSize)}
 	taskIDs, err := s.rdb.ZRangeByScore(ctx, "scheduler:queue", opts).Result()
 	if err != nil {
-		slog.Error("poll failed", "worker_id", s.workerID, "err", err)
+		log.Printf("ERROR: ("poll failed", "worker_id", s.workerID, "err", err)
 		return
 	}
 
@@ -354,7 +354,7 @@ func (s *Scheduler) Schedule(ctx context.Context, taskID string, handlerName str
 	})
 
 	s.metrics.tasksScheduled.Inc()
-	slog.Info("task scheduled", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName, "execute_at", executeAt)
+	log.Printf("INFO: worker init, worker_id=%s",("task scheduled", "worker_id", s.workerID, "taskID", taskID, "handler", handlerName, "execute_at", executeAt)
 	return nil
 }
 

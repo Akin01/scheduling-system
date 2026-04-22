@@ -1,0 +1,29 @@
+```
+# Go-specific ignores
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+*_test.go
+
+# Build artifacts
+bin/
+pkg/
+vendor/
+
+# Environment specific
+.env
+.env.local
+.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Coverage
+coverage/
+```

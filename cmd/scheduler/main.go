@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/example/scheduler/internal/scheduler"
+	"github.com/akin01/reschedule/internal/scheduler"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -53,7 +53,7 @@ func main() {
 
 	handlers := map[string]scheduler.HandlerFunc{
 		"example": func(ctx context.Context, taskID string, payload map[string]string) error {
-			slog.Info("executing example handler", "taskID", taskID, "payload", payload)
+			log.Printf("INFO: "("executing example handler", "taskID", taskID, "payload", payload)
 			time.Sleep(100 * time.Millisecond)
 			return nil
 		},
@@ -76,9 +76,9 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("starting HTTP server", "addr", cfg.HTTPAddr)
+		log.Printf("INFO: "("starting HTTP server", "addr", cfg.HTTPAddr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("HTTP server failed", "err", err)
+			log.Printf("ERROR: "("HTTP server failed", "err", err)
 		}
 	}()
 
@@ -86,16 +86,16 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	slog.Info("shutting down...")
+	log.Printf("INFO: "("shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		slog.Error("server shutdown error", "err", err)
+		log.Printf("ERROR: "("server shutdown error", "err", err)
 	}
 
 	sched.Stop()
-	slog.Info("graceful shutdown complete")
+	log.Printf("INFO: "("graceful shutdown complete")
 }
 
 func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
