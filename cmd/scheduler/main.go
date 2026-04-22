@@ -2,143 +2,178 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/akin01/reschedule/internal/scheduler"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/akin01/reschedule/internal/common"
+	"github.com/akin01/reschedule/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-func main() {
-	cfg := scheduler.DefaultConfig()
+var (
+	tasksScheduled = promauto.NewCounterVec(
+		prometheus.CounterOpts{Name: "scheduler_tasks_scheduled_total"},
+		[]string{"worker_id"},
+	)
+	tasksMoved = promauto.NewCounterVec(
+		prometheus.CounterOpts{Name: "scheduler_tasks_moved_total"},
+		[]string{"worker_id"},
+	)
+	schedulerErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{Name: "scheduler_errors_total"},
+		[]string{"worker_id", "operation"},
+	)
+	queueLengthGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "scheduler_queue_length"},
+		[]string{"worker_id"},
+	)
+	scheduledLengthGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "scheduler_scheduled_length"},
+		[]string{"worker_id"},
+	)
+)
 
-	if addr := os.Getenv("REDIS_URL"); addr != "" {
-		cfg.RedisAddr = addr
-	}
-	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		cfg.RedisAddr = addr
-	}
-	if interval := os.Getenv("POLL_INTERVAL"); interval != "" {
-		if d, err := time.ParseDuration(interval); err == nil {
-			cfg.PollInterval = d
-		}
-	}
-	if batchSize := os.Getenv("BATCH_SIZE"); batchSize != "" {
-		fmt.Sscanf(batchSize, "%d", &cfg.BatchSize)
-	}
-	if lockTTL := os.Getenv("LOCK_TTL"); lockTTL != "" {
-		if d, err := time.ParseDuration(lockTTL); err == nil {
-			cfg.LockTTL = d
-		}
-	}
-	if httpAddr := os.Getenv("HTTP_ADDR"); httpAddr != "" {
-		cfg.HTTPAddr = httpAddr
-	}
-	if authToken := os.Getenv("AUTH_TOKEN"); authToken != "" {
-		cfg.AuthToken = authToken
-	}
-	if maxRetries := os.Getenv("MAX_RETRIES"); maxRetries != "" {
-		fmt.Sscanf(maxRetries, "%d", &cfg.MaxRetries)
-	}
-	if useCluster := os.Getenv("USE_REDIS_CLUSTER"); useCluster == "true" {
-		cfg.UseCluster = true
-	}
+type Scheduler struct {
+	store    *store.Store
+	config   common.Config
+	workerID string
+	done     chan struct{}
+	wg       sync.WaitGroup
+}
 
-	handlers := map[string]scheduler.HandlerFunc{
-		"example": func(ctx context.Context, taskID string, payload map[string]string) error {
-			log.Printf("INFO: "("executing example handler", "taskID", taskID, "payload", payload)
-			time.Sleep(100 * time.Millisecond)
-			return nil
-		},
+func NewScheduler(cfg common.Config, store *store.Store) *Scheduler {
+	hostname, _ := os.Hostname()
+	pid := os.Getpid()
+	workerID := fmt.Sprintf("scheduler-%s-%d", hostname, pid)
+
+	return &Scheduler{
+		store:    store,
+		config:   cfg,
+		workerID: workerID,
+		done:     make(chan struct{}),
 	}
+}
 
-	sched := scheduler.NewScheduler(cfg, handlers)
-	sched.Start()
+func (s *Scheduler) Start() {
+	log.Printf("[SCHEDULER] Starting scheduler service (worker_id=%s)", s.workerID)
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("POST /tasks/{id}/retry", authMiddleware(cfg.AuthToken, handleRetryTask(sched)))
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
-	})
+	ticker := time.NewTicker(s.config.PollInterval)
+	defer ticker.Stop()
 
-	server := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: mux,
-	}
-
+	s.wg.Add(1)
 	go func() {
-		log.Printf("INFO: "("starting HTTP server", "addr", cfg.HTTPAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("ERROR: "("HTTP server failed", "err", err)
+		defer s.wg.Done()
+		for {
+			select {
+			case <-ticker.C:
+				s.pollAndMove()
+			case <-s.done:
+				return
+			}
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Metrics reporting
+	metricsTicker := time.NewTicker(10 * time.Second)
+	defer metricsTicker.Stop()
 
-	log.Printf("INFO: "("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("ERROR: "("server shutdown error", "err", err)
-	}
-
-	sched.Stop()
-	log.Printf("INFO: "("graceful shutdown complete")
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			select {
+			case <-metricsTicker.C:
+				s.reportMetrics()
+			case <-s.done:
+				return
+			}
+		}
+	}()
 }
 
-func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if token == "" {
-			next(w, r)
-			return
+func (s *Scheduler) Stop() {
+	log.Printf("[SCHEDULER] Stopping scheduler service...")
+	close(s.done)
+	s.wg.Wait()
+	log.Printf("[SCHEDULER] Scheduler stopped")
+}
+
+func (s *Scheduler) pollAndMove() {
+	ctx := context.Background()
+
+	// Get tasks from scheduled queue that are due
+	now := time.Now()
+	taskIDs, err := s.store.GetDueTasks(ctx, s.config.BatchSize)
+	if err != nil {
+		log.Printf("[SCHEDULER] Error getting scheduled tasks: %v", err)
+		schedulerErrors.WithLabelValues(s.workerID, "get_due_tasks").Inc()
+		return
+	}
+
+	for _, taskID := range taskIDs {
+		task, err := s.store.GetTask(ctx, taskID)
+		if err != nil {
+			log.Printf("[SCHEDULER] Error getting task %s: %v", taskID, err)
+			continue
+		}
+		if task == nil {
+			continue
 		}
 
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "missing authorization header", http.StatusUnauthorized)
-			return
+		// Move to active queue for execution
+		if err := s.store.MoveToQueue(ctx, taskID, now); err != nil {
+			log.Printf("[SCHEDULER] Error moving task %s to queue: %v", taskID, err)
+			schedulerErrors.WithLabelValues(s.workerID, "move_to_queue").Inc()
+			continue
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" || parts[1] != token {
-			http.Error(w, "invalid authorization", http.StatusUnauthorized)
-			return
-		}
-
-		next(w, r)
+		tasksScheduled.WithLabelValues(s.workerID).Inc()
+		tasksMoved.WithLabelValues(s.workerID).Inc()
+		log.Printf("[SCHEDULER] Moved task %s to active queue (handler=%s)", taskID, task.Handler)
 	}
 }
 
-func handleRetryTask(sched *scheduler.Scheduler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		taskID := strings.TrimPrefix(path, "/tasks/")
-		taskID = strings.TrimSuffix(taskID, "/retry")
+func (s *Scheduler) reportMetrics() {
+	ctx := context.Background()
 
-		if taskID == "" {
-			http.Error(w, "invalid taskID", http.StatusBadRequest)
-			return
-		}
-
-		ctx := r.Context()
-		if err := sched.RetryTask(ctx, taskID); err != nil {
-			http.Error(w, fmt.Sprintf("retry failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"retried": true})
+	scheduledLen, err := s.store.ScheduledLength(ctx)
+	if err == nil {
+		scheduledLengthGauge.WithLabelValues(s.workerID).Set(float64(scheduledLen))
 	}
+
+	queueLen, err := s.store.QueueLength(ctx)
+	if err == nil {
+		queueLengthGauge.WithLabelValues(s.workerID).Set(float64(queueLen))
+	}
+}
+
+func main() {
+	cfg := common.LoadConfig("scheduler")
+
+	client, err := store.NewRedisClient(cfg.GetRedisAddr(), cfg.UseCluster)
+	if err != nil {
+		log.Fatalf("[SCHEDULER] Failed to connect to Redis: %v", err)
+	}
+	defer client.Close()
+
+	taskStore := store.NewStore(client, cfg.TaskTTL)
+	scheduler := NewScheduler(cfg, taskStore)
+
+	// Graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	scheduler.Start()
+
+	sig := <-sigChan
+	log.Printf("[SCHEDULER] Received signal %v, shutting down...", sig)
+	scheduler.Stop()
+
+	log.Println("[SCHEDULER] Scheduler service stopped")
 }
