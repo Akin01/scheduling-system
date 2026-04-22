@@ -28,9 +28,11 @@ The scheduler uses a poll-based architecture where workers continuously poll Red
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.19+ (Go 1.21+ recommended for `log/slog` support)
 - Docker and Docker Compose (for development)
 - Redis 7+ (or Redis Cluster)
+
+**Note**: The code uses `log/slog` which requires Go 1.21+. If using Go 1.19, build with Docker or upgrade your Go installation.
 
 ### Development with Docker Compose
 
