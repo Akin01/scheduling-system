@@ -60,6 +60,7 @@ go run ./cmd/scheduler
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `REDIS_URL` | `` | Redis URL (e.g., `redis://localhost:6379`). Takes precedence over REDIS_ADDR |
 | `REDIS_ADDR` | `localhost:6379` | Redis address (comma-separated for cluster) |
 | `POLL_INTERVAL` | `100ms` | How often to poll for due tasks |
 | `BATCH_SIZE` | `1000` | Maximum tasks to fetch per poll |
@@ -196,6 +197,49 @@ REDIS_ADDR=redis:6379 HTTP_ADDR=:8082 ./scheduler
 ### Kubernetes
 
 Use the provided Dockerfile and deploy with appropriate environment variables. Consider using a StatefulSet or Deployment with multiple replicas.
+
+## Testing
+
+### Prerequisites
+
+Tests require a running Redis instance. You can use Docker:
+
+```bash
+docker run -d --name redis-test -p 6379:6379 redis:7-alpine
+```
+
+### Running Tests
+
+```bash
+# Using default localhost:6379
+go test ./...
+
+# Using REDIS_URL environment variable
+REDIS_URL=redis://localhost:6379 go test ./...
+
+# Using REDIS_ADDR environment variable  
+REDIS_ADDR=localhost:6379 go test ./...
+
+# With verbose output
+go test -v ./...
+
+# With race detector
+go test -race ./...
+
+# Specific test
+go test -run TestSchedule ./...
+```
+
+### Test Coverage
+
+```bash
+# Generate coverage report
+go test -cover ./...
+
+# Generate HTML coverage report
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
 
 ## License
 

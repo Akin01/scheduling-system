@@ -19,6 +19,9 @@ import (
 func main() {
 	cfg := scheduler.DefaultConfig()
 
+	if addr := os.Getenv("REDIS_URL"); addr != "" {
+		cfg.RedisAddr = addr
+	}
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 		cfg.RedisAddr = addr
 	}
